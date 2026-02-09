@@ -7,6 +7,10 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 from ai_investment_assistant import InvestmentAssistant
+from ai_investment_assistant.data_fetcher import MarketDataFetcher
+from ai_investment_assistant.preprocess import DataPreprocessor
+from ai_investment_assistant.technicals import TechnicalIndicators
+from ai_investment_assistant.signals import SignalGenerator
 
 st.set_page_config(page_title="AI Investment Assistant", layout="wide")
 st.title("AI Investment Assistant Workflow")
@@ -92,11 +96,31 @@ def run_assistant(symbol: str):
     return assistant.run(symbol)
 
 
-def compute_matrix_row(symbol):
-    result = run_assistant(symbol)
-    df = result.data
-    latest = df.iloc[-1]
+@st.cache_data(show_spinner=False)
+def batch_fetch(symbols: list[str]):
+    fetcher = MarketDataFetcher()
+    return fetcher.fetch_many(symbols)
 
+
+@st.cache_data(show_spinner=False)
+def batch_signals(symbols: list[str]):
+    fetcher = MarketDataFetcher()
+    pre = DataPreprocessor()
+    ind = TechnicalIndicators()
+    sig = SignalGenerator()
+
+    data_map = fetcher.fetch_many(symbols)
+    results = {}
+    for sym, df in data_map.items():
+        df = pre.clean(df)
+        df = ind.add_all(df)
+        df = sig.generate(df)
+        results[sym] = df
+    return results
+
+
+def compute_matrix_row(symbol, df):
+    latest = df.iloc[-1]
     returns = df["close"].pct_change().dropna()
     annual_return = (df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100
     volatility = returns.std() * (252 ** 0.5) * 100
@@ -121,7 +145,7 @@ def compute_matrix_row(symbol):
         "Avg Volume": int(avg_volume) if pd.notna(avg_volume) else None,
         "RSI": round(float(latest["rsi"]), 2),
         "Trend": trend,
-        "Signal": result.signal["action"],
+        "Signal": "BUY" if latest["signal"] == 1 else ("SELL" if latest["signal"] == -1 else "HOLD"),
         "Risk Label": risk_label,
     }
 
@@ -196,7 +220,13 @@ matrix_symbols = st.text_input("Symbols (comma-separated)", "AAPL, MSFT, BP.L, H
 
 if st.button("Generate Matrix"):
     symbols = [s.strip().upper() for s in matrix_symbols.split(",") if s.strip()]
-    rows = [compute_matrix_row(sym) for sym in symbols]
+    data_map = batch_signals(symbols)
+    rows = []
+    for sym in symbols:
+        df = data_map.get(sym)
+        if df is None or df.empty:
+            continue
+        rows.append(compute_matrix_row(sym, df))
     matrix_df = pd.DataFrame(rows)
     st.dataframe(matrix_df)
 
@@ -222,14 +252,17 @@ st.subheader("Run Watchlist Scan")
 
 if st.button("Scan Watchlist"):
     symbols = [s.strip().upper() for s in wl_symbols.split(",") if s.strip()]
+    data_map = batch_signals(symbols)
     rows = []
 
     for sym in symbols:
-        try:
-            res = run_assistant(sym)
-            rows.append({"Symbol": sym, "Signal": res.signal["action"], "Price": res.data["close"].iloc[-1]})
-        except Exception:
+        df = data_map.get(sym)
+        if df is None or df.empty:
             rows.append({"Symbol": sym, "Signal": "ERROR", "Price": None})
+            continue
+        latest = df.iloc[-1]
+        signal = "BUY" if latest["signal"] == 1 else ("SELL" if latest["signal"] == -1 else "HOLD")
+        rows.append({"Symbol": sym, "Signal": signal, "Price": float(latest["close"])})
 
     scan_df = pd.DataFrame(rows)
     st.dataframe(scan_df)

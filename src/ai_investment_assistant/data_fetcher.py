@@ -25,25 +25,9 @@ class MarketDataFetcher:
 
     def __init__(self, config: Optional[FetchConfig] = None) -> None:
         self.config = config or FetchConfig()
+        self._cache: dict[tuple, pd.DataFrame] = {}
 
-    def fetch(self, symbol: str, start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
-        interval = self.config.interval
-        if interval != "1d":
-            raise ValueError("Only daily (1d) interval is supported for governance safety.")
-
-        start = start or self.config.start
-        end = end or self.config.end
-
-        try:
-            import yfinance as yf
-        except ImportError as exc:
-            raise ImportError("yfinance is required. Install with `pip install yfinance`." ) from exc
-
-        logger.info("Fetching data for %s from %s to %s", symbol, start, end)
-        data = yf.download(symbol, start=start, end=end, interval=interval, auto_adjust=False)
-        if data.empty:
-            raise ValueError(f"No data returned for symbol {symbol}.")
-
+    def _normalize(self, data: pd.DataFrame, symbol: str) -> pd.DataFrame:
         # Flatten multi-index columns if present
         if isinstance(data.columns, pd.MultiIndex):
             if symbol in data.columns.get_level_values(-1):
@@ -65,6 +49,86 @@ class MarketDataFetcher:
         data = data[["open", "high", "low", "close", "adj_close", "volume"]]
         data = data.dropna(how="all")
         return data
+
+    def fetch(self, symbol: str, start: Optional[str] = None, end: Optional[str] = None) -> pd.DataFrame:
+        interval = self.config.interval
+        if interval != "1d":
+            raise ValueError("Only daily (1d) interval is supported for governance safety.")
+
+        start = start or self.config.start
+        end = end or self.config.end
+
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise ImportError("yfinance is required. Install with `pip install yfinance`." ) from exc
+
+        cache_key = (symbol, start, end, interval)
+        if cache_key in self._cache:
+            logger.info("Using cached data for %s", symbol)
+            return self._cache[cache_key].copy()
+
+        logger.info("Fetching data for %s from %s to %s", symbol, start, end)
+        data = yf.download(symbol, start=start, end=end, interval=interval, auto_adjust=False)
+        if data.empty:
+            raise ValueError(f"No data returned for symbol {symbol}.")
+
+        data = self._normalize(data, symbol)
+        self._cache[cache_key] = data.copy()
+        return data
+
+    def fetch_many(self, symbols: list[str], start: Optional[str] = None, end: Optional[str] = None) -> dict[str, pd.DataFrame]:
+        interval = self.config.interval
+        if interval != "1d":
+            raise ValueError("Only daily (1d) interval is supported for governance safety.")
+
+        start = start or self.config.start
+        end = end or self.config.end
+
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise ImportError("yfinance is required. Install with `pip install yfinance`." ) from exc
+
+        symbols = [s for s in symbols if s]
+        if not symbols:
+            return {}
+
+        # Use cached entries when available
+        remaining = []
+        results: dict[str, pd.DataFrame] = {}
+        for symbol in symbols:
+            cache_key = (symbol, start, end, interval)
+            if cache_key in self._cache:
+                results[symbol] = self._cache[cache_key].copy()
+            else:
+                remaining.append(symbol)
+
+        if remaining:
+            logger.info("Batch fetching data for %d symbols", len(remaining))
+            data = yf.download(
+                tickers=" ".join(remaining),
+                start=start,
+                end=end,
+                interval=interval,
+                auto_adjust=False,
+                group_by="ticker",
+                threads=True,
+            )
+            if data.empty:
+                return results
+
+            for symbol in remaining:
+                try:
+                    symbol_df = data[symbol] if isinstance(data.columns, pd.MultiIndex) else data
+                    normalized = self._normalize(symbol_df, symbol)
+                    results[symbol] = normalized
+                    cache_key = (symbol, start, end, interval)
+                    self._cache[cache_key] = normalized.copy()
+                except Exception:
+                    continue
+
+        return results
 
     @staticmethod
     def synthetic(symbol: str = "SYN", periods: int = 252) -> pd.DataFrame:
