@@ -1,4 +1,4 @@
-"""Backtest helper module."""
+"""Backtest helper module with configurable dates."""
 
 from __future__ import annotations
 

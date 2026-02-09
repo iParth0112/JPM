@@ -44,6 +44,7 @@ target_ccy = st.sidebar.selectbox("Normalize To", ["USD", "GBP", "EUR"], index=0
 
 indicators_enabled = {
     "rsi": st.sidebar.checkbox("RSI", value=True),
+    "macd": st.sidebar.checkbox("MACD", value=True),
 }
 
 if page == "Market Dashboard":

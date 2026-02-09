@@ -9,15 +9,15 @@ import plotly.graph_objects as go
 from .data_loader import (
     fetch_market_data,
     validate_symbol,
-    ASSET_CLASS_PRESETS,
+    fetch_fundamentals,
 )
 from .indicators import add_indicators
 from .signals import generate_signals, explain_latest
 from .backtest import run_backtest
-from .portfolio import add_position, portfolio_df, portfolio_metrics
-from .validate import run_validation, governance_report
+from .portfolio import add_position, portfolio_snapshot, portfolio_metrics, allocation
+from .validate import run_validation, governance_report, audit_log
 from .ai_insights import answer_question
-from .utils import fx_rates_usd, convert_to_target, fmt_ccy
+from .fx import fx_rates_usd, convert_to_target, fmt_ccy
 
 
 def plot_candles(df: pd.DataFrame, title: str) -> go.Figure:
@@ -34,13 +34,13 @@ def plot_candles(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
-def market_dashboard(symbol: str, period: str, interval: str, base_ccy: str, target_ccy: str) -> None:
+def market_dashboard(symbol: str, period: str, interval: str, base_ccy: str, target_ccy: str) -> pd.DataFrame | None:
     st.subheader("Market Dashboard")
     df = fetch_market_data(symbol, period, interval)
     err = validate_symbol(df, symbol)
     if err:
         st.error(err)
-        return
+        return None
     rates = fx_rates_usd()
     display = df.copy()
     for col in ["open", "high", "low", "close"]:
@@ -54,6 +54,7 @@ def market_dashboard(symbol: str, period: str, interval: str, base_ccy: str, tar
     col3.metric("52W Range", f"{display['low'].min():.2f} - {display['high'].max():.2f}")
 
     st.dataframe(display.tail(10))
+    return df
 
 
 def technical_analysis(symbol: str, period: str, interval: str, indicators_enabled: dict) -> pd.DataFrame | None:
@@ -67,26 +68,25 @@ def technical_analysis(symbol: str, period: str, interval: str, indicators_enabl
     st.plotly_chart(plot_candles(df, f"{symbol} Candles"), use_container_width=True)
     if indicators_enabled.get("rsi"):
         st.line_chart(df["rsi"])
+    if indicators_enabled.get("macd"):
+        st.line_chart(df[["macd", "macd_signal"]])
     st.dataframe(df.tail(10))
     return df
 
 
 def fundamental_analysis(symbol: str) -> None:
     st.subheader("Fundamental Analysis")
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-        st.metric("PE", info.get("trailingPE", "N/A"))
-        st.metric("ROE", info.get("returnOnEquity", "N/A"))
-        st.metric("Debt/Equity", info.get("debtToEquity", "N/A"))
-        st.metric("Dividend Yield", info.get("dividendYield", "N/A"))
-        with st.expander("Financial Statements"):
-            st.write(ticker.financials)
-            st.write(ticker.balance_sheet)
-            st.write(ticker.cashflow)
-    except Exception as exc:
-        st.error(f"Fundamentals unavailable: {exc}")
+    fundamentals = fetch_fundamentals(symbol)
+    info = fundamentals.get("info", {})
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("PE", info.get("trailingPE", "N/A"))
+    col2.metric("ROE", info.get("returnOnEquity", "N/A"))
+    col3.metric("Debt/Equity", info.get("debtToEquity", "N/A"))
+    col4.metric("Dividend Yield", info.get("dividendYield", "N/A"))
+    with st.expander("Financial Statements"):
+        st.write(fundamentals.get("financials"))
+        st.write(fundamentals.get("balance_sheet"))
+        st.write(fundamentals.get("cashflow"))
 
 
 def signal_engine(df: pd.DataFrame) -> pd.DataFrame | None:
@@ -97,9 +97,18 @@ def signal_engine(df: pd.DataFrame) -> pd.DataFrame | None:
     df = generate_signals(df)
     explanation = explain_latest(df)
     st.metric("Signal", explanation.action)
+    st.metric("Score", explanation.score)
+    st.metric("Confidence", f"{explanation.confidence:.2f}")
     st.write(explanation.rationale)
     st.json(explanation.details)
-    st.dataframe(df.tail(10))
+    st.dataframe(df.tail(20))
+
+    audit_log({
+        "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "signal": explanation.action,
+        "score": explanation.score,
+        "confidence": explanation.confidence,
+    })
     return df
 
 
@@ -112,11 +121,17 @@ def portfolio_simulator(target_ccy: str) -> None:
         currency = st.text_input("Currency", value=target_ccy, key="p_ccy")
         if st.button("Add Position"):
             add_position(symbol, quantity, price, currency)
-    df = portfolio_df()
-    metrics = portfolio_metrics(df)
-    st.metric("Positions", metrics["positions"])
-    st.metric("Total Value", f"{metrics['total_value']:,.2f}")
-    st.dataframe(df)
+    snap = portfolio_snapshot(target_ccy)
+    metrics = portfolio_metrics(snap)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Positions", metrics["positions"])
+    col2.metric("Total Value", fmt_ccy(metrics["total_value"], target_ccy))
+    col3.metric("Total PnL", fmt_ccy(metrics["total_pnl"], target_ccy))
+    st.dataframe(snap)
+    alloc = allocation(snap)
+    if not alloc.empty:
+        fig = go.Figure(data=[go.Pie(labels=alloc["symbol"], values=alloc["market_value"])])
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def backtesting(df: pd.DataFrame) -> None:
@@ -127,6 +142,7 @@ def backtesting(df: pd.DataFrame) -> None:
     result = run_backtest(df)
     st.json(result["metrics"])
     st.line_chart(result["data"]["equity_curve"])
+    st.dataframe(result["data"].tail(20))
 
 
 def model_validation(df: pd.DataFrame) -> None:
