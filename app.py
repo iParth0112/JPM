@@ -1,273 +1,71 @@
-import streamlit as st
-import json
-import os
-import pandas as pd
-import plotly.graph_objects as go
-from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
+"""Streamlit app entrypoint."""
 
-from ai_investment_assistant import InvestmentAssistant
-from ai_investment_assistant.data_fetcher import MarketDataFetcher
-from ai_investment_assistant.preprocess import DataPreprocessor
-from ai_investment_assistant.technicals import TechnicalIndicators
-from ai_investment_assistant.signals import SignalGenerator
+import streamlit as st
+
+from ai_investment_assistant_app.data_loader import ASSET_CLASS_PRESETS, normalize_symbol
+from ai_investment_assistant_app.ui_pages import (
+    market_dashboard,
+    technical_analysis,
+    fundamental_analysis,
+    signal_engine,
+    portfolio_simulator,
+    backtesting,
+    model_validation,
+    ai_insights,
+)
 
 st.set_page_config(page_title="AI Investment Assistant", layout="wide")
-st.title("AI Investment Assistant Workflow")
 
-st_autorefresh(interval=60_000, key="autorefresh")
+st.sidebar.title("Navigation")
+page = st.sidebar.radio(
+    "Go to",
+    [
+        "Market Dashboard",
+        "Technical Analysis",
+        "Fundamental Analysis",
+        "Signal Engine",
+        "Portfolio Simulator",
+        "Backtesting",
+        "Model Validation & Governance",
+        "AI Insights",
+        "Settings",
+    ],
+)
 
-MARKETS = {
-    "US": {
-        "Apple (AAPL)": "AAPL",
-        "Microsoft (MSFT)": "MSFT",
-        "Google (GOOGL)": "GOOGL",
-        "Amazon (AMZN)": "AMZN",
-        "Nvidia (NVDA)": "NVDA",
-        "Tesla (TSLA)": "TSLA",
-        "Meta (META)": "META",
-        "Netflix (NFLX)": "NFLX",
-        "JPMorgan (JPM)": "JPM",
-        "Visa (V)": "V",
-    },
-    "UK": {
-        "BP (BP.L)": "BP.L",
-        "HSBC (HSBA.L)": "HSBA.L",
-        "Unilever (ULVR.L)": "ULVR.L",
-        "Vodafone (VOD.L)": "VOD.L",
-        "Shell (SHEL.L)": "SHEL.L",
-        "AstraZeneca (AZN.L)": "AZN.L",
-        "Barclays (BARC.L)": "BARC.L",
-        "Tesco (TSCO.L)": "TSCO.L",
-    },
-    "India": {
-        "Reliance (RELIANCE.NS)": "RELIANCE.NS",
-        "TCS (TCS.NS)": "TCS.NS",
-        "Infosys (INFY.NS)": "INFY.NS",
-        "HDFC Bank (HDFCBANK.NS)": "HDFCBANK.NS",
-        "ICICI Bank (ICICIBANK.NS)": "ICICIBANK.NS",
-        "HUL (HINDUNILVR.NS)": "HINDUNILVR.NS",
-        "Bharti Airtel (BHARTIARTL.NS)": "BHARTIARTL.NS",
-        "ITC (ITC.NS)": "ITC.NS",
-    },
+st.sidebar.title("Market Data")
+asset_class = st.sidebar.selectbox("Asset Class", list(ASSET_CLASS_PRESETS.keys()))
+symbol_input = st.sidebar.text_input("Symbol", ASSET_CLASS_PRESETS[asset_class]["example"])
+symbol = normalize_symbol(symbol_input)
+period = st.sidebar.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+interval = st.sidebar.selectbox("Interval", ["1d", "1wk", "1mo"], index=0)
+
+base_ccy = st.sidebar.selectbox("Local Currency", ["USD", "GBP", "EUR"], index=0)
+target_ccy = st.sidebar.selectbox("Normalize To", ["USD", "GBP", "EUR"], index=0)
+
+indicators_enabled = {
+    "rsi": st.sidebar.checkbox("RSI", value=True),
 }
 
-WATCHLIST_FILE = "watchlists.json"
-SCAN_EXPORT_DIR = "watchlist_exports"
-os.makedirs(SCAN_EXPORT_DIR, exist_ok=True)
-
-
-def load_watchlists():
-    if os.path.exists(WATCHLIST_FILE):
-        return json.load(open(WATCHLIST_FILE))
-    return {"default": ["AAPL", "MSFT", "BP.L", "RELIANCE.NS"]}
-
-
-def save_watchlists(data):
-    with open(WATCHLIST_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def plot_signals_chart(df, symbol):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df["open"], high=df["high"],
-        low=df["low"], close=df["close"], name="Price"
-    ))
-    buys = df[df["signal"].astype(str).str.contains("BUY", na=False)]
-    sells = df[df["signal"].astype(str).str.contains("SELL", na=False)]
-    fig.add_trace(go.Scatter(
-        x=buys.index, y=buys["close"],
-        mode="markers", name="BUY",
-        marker=dict(color="green", size=10, symbol="triangle-up")
-    ))
-    fig.add_trace(go.Scatter(
-        x=sells.index, y=sells["close"],
-        mode="markers", name="SELL",
-        marker=dict(color="red", size=10, symbol="triangle-down")
-    ))
-    fig.update_layout(title=f"{symbol} Signals", xaxis_title="Date", yaxis_title="Price")
-    return fig
-
-
-@st.cache_data(show_spinner=False)
-def run_assistant(symbol: str):
-    assistant = InvestmentAssistant()
-    return assistant.run(symbol)
-
-
-@st.cache_data(show_spinner=False)
-def batch_fetch(symbols: list[str]):
-    fetcher = MarketDataFetcher()
-    return fetcher.fetch_many(symbols)
-
-
-@st.cache_data(show_spinner=False)
-def batch_signals(symbols: list[str]):
-    fetcher = MarketDataFetcher()
-    pre = DataPreprocessor()
-    ind = TechnicalIndicators()
-    sig = SignalGenerator()
-
-    data_map = fetcher.fetch_many(symbols)
-    results = {}
-    for sym, df in data_map.items():
-        df = pre.clean(df)
-        df = ind.add_all(df)
-        df = sig.generate(df)
-        results[sym] = df
-    return results
-
-
-def compute_matrix_row(symbol, df):
-    latest = df.iloc[-1]
-    returns = df["close"].pct_change().dropna()
-    annual_return = (df["close"].iloc[-1] / df["close"].iloc[0] - 1) * 100
-    volatility = returns.std() * (252 ** 0.5) * 100
-    drawdown = (df["close"] / df["close"].cummax() - 1).min() * 100
-    avg_volume = df["volume"].rolling(20).mean().iloc[-1]
-
-    trend = "Up" if latest["sma_fast"] > latest["sma_slow"] else "Down"
-
-    if volatility < 20:
-        risk_label = "Low"
-    elif volatility < 35:
-        risk_label = "Medium"
-    else:
-        risk_label = "High"
-
-    return {
-        "Symbol": symbol,
-        "Price": round(float(latest["close"]), 2),
-        "1Y Return %": round(annual_return, 2),
-        "Volatility %": round(volatility, 2),
-        "Max Drawdown %": round(drawdown, 2),
-        "Avg Volume": int(avg_volume) if pd.notna(avg_volume) else None,
-        "RSI": round(float(latest["rsi"]), 2),
-        "Trend": trend,
-        "Signal": "BUY" if latest["signal"] == 1 else ("SELL" if latest["signal"] == -1 else "HOLD"),
-        "Risk Label": risk_label,
-    }
-
-
-st.sidebar.header("Market & Symbol")
-market = st.sidebar.selectbox("Market", list(MARKETS.keys()))
-options = MARKETS[market]
-
-search = st.sidebar.text_input("Search company")
-filtered = [k for k in options.keys() if search.lower() in k.lower()] or list(options.keys())
-selected = st.sidebar.selectbox("Select company", filtered)
-symbol = options[selected]
-
-manual = st.sidebar.text_input("Or enter symbol manually", "")
-if manual.strip():
-    symbol = manual.strip().upper()
-
-show_chart = st.sidebar.checkbox("Show Chart", value=True)
-
-st.subheader(f"Selected Symbol: {symbol}")
-
-if st.button("Run Full Workflow"):
-    result = run_assistant(symbol)
-
-    tabs = st.tabs([
-        "Data Sources",
-        "Ingestion & Processing",
-        "AI Models & Analysis",
-        "Risk Management",
-        "Decision & Advisory",
-        "Reporting & Compliance",
-    ])
-
-    with tabs[0]:
-        st.write("Market data sample")
-        st.dataframe(result.data[["open", "high", "low", "close", "volume"]].tail(10))
-        st.write("Sentiment")
-        st.json(result.signal["sentiment"])
-        st.write("Macro")
-        st.json(result.signal["macro"])
-
-    with tabs[1]:
-        st.write("Indicators snapshot")
-        st.dataframe(result.data[["sma_fast", "sma_slow", "rsi", "macd", "adx", "volume_ratio"]].tail(10))
-
-    with tabs[2]:
-        st.write("Signal + Explainability")
-        st.json(result.signal)
-        if show_chart:
-            st.plotly_chart(plot_signals_chart(result.data, symbol), use_container_width=True)
-        st.write("ML Validation")
-        st.json(result.signal["ml_report"])
-
-    with tabs[3]:
-        st.write("Risk outputs")
-        st.json(result.signal["risk"])
-
-    with tabs[4]:
-        st.write("Recommendation")
-        st.json({"action": result.signal["action"], "rationale": result.signal["rationale"]})
-        st.write("Backtest metrics")
-        st.json(result.backtest)
-
-    with tabs[5]:
-        st.write("Validation")
-        st.json(result.validation)
-
-st.divider()
-st.header("Beginner Facts + Calculation Matrix (US/UK/India)")
-
-matrix_symbols = st.text_input("Symbols (comma-separated)", "AAPL, MSFT, BP.L, HSBA.L, RELIANCE.NS, TCS.NS")
-
-if st.button("Generate Matrix"):
-    symbols = [s.strip().upper() for s in matrix_symbols.split(",") if s.strip()]
-    data_map = batch_signals(symbols)
-    rows = []
-    for sym in symbols:
-        df = data_map.get(sym)
-        if df is None or df.empty:
-            continue
-        rows.append(compute_matrix_row(sym, df))
-    matrix_df = pd.DataFrame(rows)
-    st.dataframe(matrix_df)
-
-st.divider()
-st.header("Watchlists & Alerts")
-
-watchlists = load_watchlists()
-wl_name = st.text_input("Watchlist name", "default")
-wl_symbols = st.text_area("Symbols (comma-separated)", ", ".join(watchlists.get(wl_name, [])))
-
-col1, col2 = st.columns(2)
-
-if col1.button("Save Watchlist"):
-    watchlists[wl_name] = [s.strip().upper() for s in wl_symbols.split(",") if s.strip()]
-    save_watchlists(watchlists)
-    st.success("Watchlist saved")
-
-if col2.button("Load Watchlist"):
-    symbols = watchlists.get(wl_name, [])
-    st.write("Loaded:", symbols)
-
-st.subheader("Run Watchlist Scan")
-
-if st.button("Scan Watchlist"):
-    symbols = [s.strip().upper() for s in wl_symbols.split(",") if s.strip()]
-    data_map = batch_signals(symbols)
-    rows = []
-
-    for sym in symbols:
-        df = data_map.get(sym)
-        if df is None or df.empty:
-            rows.append({"Symbol": sym, "Signal": "ERROR", "Price": None})
-            continue
-        latest = df.iloc[-1]
-        signal = "BUY" if latest["signal"] == 1 else ("SELL" if latest["signal"] == -1 else "HOLD")
-        rows.append({"Symbol": sym, "Signal": signal, "Price": float(latest["close"])})
-
-    scan_df = pd.DataFrame(rows)
-    st.dataframe(scan_df)
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"{SCAN_EXPORT_DIR}/watchlist_scan_{ts}.csv"
-    scan_df.to_csv(csv_path, index=False)
-    st.success(f"Saved CSV: {csv_path}")
+if page == "Market Dashboard":
+    market_dashboard(symbol, period, interval, base_ccy, target_ccy)
+elif page == "Technical Analysis":
+    st.session_state["df"] = technical_analysis(symbol, period, interval, indicators_enabled)
+elif page == "Fundamental Analysis":
+    fundamental_analysis(symbol)
+elif page == "Signal Engine":
+    df = st.session_state.get("df")
+    st.session_state["signals"] = signal_engine(df)
+elif page == "Portfolio Simulator":
+    portfolio_simulator(target_ccy)
+elif page == "Backtesting":
+    df = st.session_state.get("signals") or st.session_state.get("df")
+    backtesting(df)
+elif page == "Model Validation & Governance":
+    df = st.session_state.get("signals") or st.session_state.get("df")
+    model_validation(df)
+elif page == "AI Insights":
+    df = st.session_state.get("signals") or st.session_state.get("df")
+    ai_insights(df)
+elif page == "Settings":
+    st.subheader("Settings")
+    st.write("Add API keys and preferences here.")
