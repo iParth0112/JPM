@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 from ai_investment_assistant import InvestmentAssistant
 
 st.set_page_config(page_title="AI Investment Assistant", layout="wide")
-st.title("AI Investment Assistant")
+st.title("AI Investment Assistant Workflow")
 
 st_autorefresh(interval=60_000, key="autorefresh")
 
@@ -86,9 +86,14 @@ def plot_signals_chart(df, symbol):
     return fig
 
 
-def compute_matrix_row(symbol):
+@st.cache_data(show_spinner=False)
+def run_assistant(symbol: str):
     assistant = InvestmentAssistant()
-    result = assistant.run(symbol)
+    return assistant.run(symbol)
+
+
+def compute_matrix_row(symbol):
+    result = run_assistant(symbol)
     df = result.data
     latest = df.iloc[-1]
 
@@ -134,28 +139,55 @@ manual = st.sidebar.text_input("Or enter symbol manually", "")
 if manual.strip():
     symbol = manual.strip().upper()
 
-run_backtest = st.sidebar.checkbox("Run Backtest", value=False)
 show_chart = st.sidebar.checkbox("Show Chart", value=True)
 
 st.subheader(f"Selected Symbol: {symbol}")
 
-if st.button("Analyze"):
-    assistant = InvestmentAssistant()
-    results = assistant.run(symbol)
+if st.button("Run Full Workflow"):
+    result = run_assistant(symbol)
 
-    st.subheader("Latest Signal")
-    st.json(results.signal)
+    tabs = st.tabs([
+        "Data Sources",
+        "Ingestion & Processing",
+        "AI Models & Analysis",
+        "Risk Management",
+        "Decision & Advisory",
+        "Reporting & Compliance",
+    ])
 
-    st.subheader("Validation")
-    st.json(results.validation)
+    with tabs[0]:
+        st.write("Market data sample")
+        st.dataframe(result.data[["open", "high", "low", "close", "volume"]].tail(10))
+        st.write("Sentiment")
+        st.json(result.signal["sentiment"])
+        st.write("Macro")
+        st.json(result.signal["macro"])
 
-    if show_chart:
-        st.subheader("Signal Chart")
-        st.plotly_chart(plot_signals_chart(results.data, symbol), use_container_width=True)
+    with tabs[1]:
+        st.write("Indicators snapshot")
+        st.dataframe(result.data[["sma_fast", "sma_slow", "rsi", "macd", "adx", "volume_ratio"]].tail(10))
 
-    if run_backtest:
-        st.subheader("Backtest Metrics")
-        st.json(results.backtest)
+    with tabs[2]:
+        st.write("Signal + Explainability")
+        st.json(result.signal)
+        if show_chart:
+            st.plotly_chart(plot_signals_chart(result.data, symbol), use_container_width=True)
+        st.write("ML Validation")
+        st.json(result.signal["ml_report"])
+
+    with tabs[3]:
+        st.write("Risk outputs")
+        st.json(result.signal["risk"])
+
+    with tabs[4]:
+        st.write("Recommendation")
+        st.json({"action": result.signal["action"], "rationale": result.signal["rationale"]})
+        st.write("Backtest metrics")
+        st.json(result.backtest)
+
+    with tabs[5]:
+        st.write("Validation")
+        st.json(result.validation)
 
 st.divider()
 st.header("Beginner Facts + Calculation Matrix (US/UK/India)")
@@ -189,13 +221,12 @@ if col2.button("Load Watchlist"):
 st.subheader("Run Watchlist Scan")
 
 if st.button("Scan Watchlist"):
-    assistant = InvestmentAssistant()
     symbols = [s.strip().upper() for s in wl_symbols.split(",") if s.strip()]
     rows = []
 
     for sym in symbols:
         try:
-            res = assistant.run(sym)
+            res = run_assistant(sym)
             rows.append({"Symbol": sym, "Signal": res.signal["action"], "Price": res.data["close"].iloc[-1]})
         except Exception:
             rows.append({"Symbol": sym, "Signal": "ERROR", "Price": None})
