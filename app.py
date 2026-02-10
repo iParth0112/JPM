@@ -2,7 +2,7 @@
 
 import streamlit as st
 
-from ai_investment_assistant_app.data_loader import ASSET_CLASS_PRESETS, normalize_symbol
+from ai_investment_assistant_app.data_loader import ASSET_CLASS_PRESETS, resolve_symbol
 from ai_investment_assistant_app.ui_pages import (
     market_dashboard,
     technical_analysis,
@@ -35,7 +35,7 @@ page = st.sidebar.radio(
 st.sidebar.title("Market Data")
 asset_class = st.sidebar.selectbox("Asset Class", list(ASSET_CLASS_PRESETS.keys()))
 symbol_input = st.sidebar.text_input("Symbol", ASSET_CLASS_PRESETS[asset_class]["example"])
-symbol = normalize_symbol(symbol_input)
+symbol = resolve_symbol(symbol_input)
 period = st.sidebar.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
 interval = st.sidebar.selectbox("Interval", ["1d", "1wk", "1mo"], index=0)
 
@@ -55,7 +55,7 @@ elif page == "Fundamental Analysis":
     fundamental_analysis(symbol)
 elif page == "Signal Engine":
     df = st.session_state.get("df")
-    st.session_state["signals"] = signal_engine(df)
+    st.session_state["signals"] = signal_engine(df, symbol=symbol)
 elif page == "Portfolio Simulator":
     portfolio_simulator(target_ccy)
 elif page == "Backtesting":
@@ -69,4 +69,4 @@ elif page == "AI Insights":
     ai_insights(df)
 elif page == "Settings":
     st.subheader("Settings")
-    st.write("Add API keys and preferences here.")
+    st.write("Settings are stored in session state for this run.")

@@ -11,8 +11,9 @@ from .data_loader import (
     validate_symbol,
     fetch_fundamentals,
 )
+from .fundamentals import fundamentals_dispatch, uk_fundamentals
 from .indicators import add_indicators
-from .signals import generate_signals, explain_latest
+from .signals import generate_signals, explain_latest, review_horizon
 from .backtest import run_backtest
 from .portfolio import add_position, portfolio_snapshot, portfolio_metrics, allocation
 from .validate import run_validation, governance_report, audit_log
@@ -77,34 +78,49 @@ def technical_analysis(symbol: str, period: str, interval: str, indicators_enabl
 def fundamental_analysis(symbol: str) -> None:
     st.subheader("Fundamental Analysis")
     fundamentals = fetch_fundamentals(symbol)
+    official = fundamentals_dispatch(symbol)
     info = fundamentals.get("info", {})
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("PE", info.get("trailingPE", "N/A"))
     col2.metric("ROE", info.get("returnOnEquity", "N/A"))
     col3.metric("Debt/Equity", info.get("debtToEquity", "N/A"))
     col4.metric("Dividend Yield", info.get("dividendYield", "N/A"))
+    if official:
+        st.info(f"Official source: {official.source} | Latest filing: {official.latest_filing_date}")
+    elif symbol.upper().endswith(".L"):
+        with st.expander("UK Official Data (Companies House)"):
+            st.write("Provide company number to fetch official UK data.")
+            company_number = st.text_input("Company Number (UK)")
+            if company_number:
+                uk = uk_fundamentals(company_number)
+                if uk:
+                    st.info(f"Official source: {uk.source} | Latest filing: {uk.latest_filing_date}")
+                    st.json(uk.facts)
     with st.expander("Financial Statements"):
         st.write(fundamentals.get("financials"))
         st.write(fundamentals.get("balance_sheet"))
         st.write(fundamentals.get("cashflow"))
 
 
-def signal_engine(df: pd.DataFrame) -> pd.DataFrame | None:
+def signal_engine(df: pd.DataFrame, symbol: str | None = None) -> pd.DataFrame | None:
     st.subheader("Signal Engine")
     if df is None or df.empty:
         st.info("Run Technical Analysis first.")
         return None
     df = generate_signals(df)
     explanation = explain_latest(df)
-    st.metric("Signal", explanation.action)
-    st.metric("Score", explanation.score)
-    st.metric("Confidence", f"{explanation.confidence:.2f}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Signal", explanation.action)
+    col2.metric("Score", explanation.score)
+    col3.metric("Confidence", f"{explanation.confidence:.2f}")
     st.write(explanation.rationale)
+    st.info(f"Review horizon: {review_horizon(df)}")
     st.json(explanation.details)
     st.dataframe(df.tail(20))
 
     audit_log({
         "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "symbol": symbol or "",
         "signal": explanation.action,
         "score": explanation.score,
         "confidence": explanation.confidence,
@@ -154,13 +170,29 @@ def model_validation(df: pd.DataFrame) -> None:
     gov = governance_report(df)
     st.json(checks)
     st.json(gov.__dict__)
+    # Show audit log if exists
+    try:
+        import pandas as pd
+        audit_df = pd.read_csv("artifacts/audit/audit_log_app.csv")
+        st.subheader("Audit Log")
+        st.dataframe(audit_df.tail(50))
+    except Exception:
+        st.info("No audit logs yet.")
 
 
 def ai_insights(df: pd.DataFrame) -> None:
     st.subheader("AI Insights")
     question = st.text_input("Ask a question")
     if question:
-        response = answer_question(question)
+        context = None
+        if df is not None and not df.empty:
+            latest = df.iloc[-1]
+            context = (
+                f"Latest close={latest.get('close', None)}, "
+                f"RSI={latest.get('rsi', None)}, "
+                f"MACD={latest.get('macd', None)}"
+            )
+        response = answer_question(question, context=context)
         st.info(response.text)
     if df is None or df.empty:
         return
